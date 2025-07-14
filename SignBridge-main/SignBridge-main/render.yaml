@@ -1,0 +1,17 @@
+# SignBridge/render.yaml (Versi Perbaikan)
+
+services:
+  # Konfigurasi untuk backend FastAPI Anda
+  - type: web
+    name: signbridge-backend
+    env: python
+    # Menentukan direktori tempat kode backend berada
+    rootDir: backend
+    # Perintah untuk menginstal dependency dari requirements.txt
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
+    # Perintah untuk menjalankan server di production
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    # Menggunakan paket gratis. Ini sudah otomatis membuat layanan bisa tertidur (auto-suspend)
+    plan: free
+    # Pengaturan Health Check untuk paket gratis
+    healthCheckPath: /
