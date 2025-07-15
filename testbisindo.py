@@ -6,7 +6,7 @@ import os
 
 # --- PILIH MODEL YANG INGIN DIGUNAKAN ---
 MODEL_TO_USE = 'BISINDO'
-MODEL_PATH = 'models\Bisindo_hybrid_model_v3_finetuned.keras' # Ganti nama file jika perlu
+MODEL_PATH = 'models\Bisindo_hybrid_model_v4_finetuned.keras' # Ganti nama file jika perlu
 DATA_DIR = './dataset/BISINDO'
 NUM_LANDMARKS = 42 * 3 # HARUS SAMA DENGAN TRAINING
 
