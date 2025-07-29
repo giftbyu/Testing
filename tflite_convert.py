@@ -6,13 +6,13 @@ import os
 MODEL_TO_CONVERT = 'SIBI' # Ganti ke 'SIBI' jika perlu
 
 if MODEL_TO_CONVERT == 'SIBI':
-    KERAS_MODEL_PATH = './models/sibi_hybrid_model_v2_finetuned.keras'
+    KERAS_MODEL_PATH = './models/sibi_hybrid_model_v_final.keras'
     DATA_DIR = './dataset/SIBI'
-    TFLITE_OUTPUT_PATH = './models/sibi_model_lightweight.tflite' # Nama file output baru
+    TFLITE_OUTPUT_PATH = './models/sibi_model_lightweight1.tflite' # Nama file output baru
 else:
     KERAS_MODEL_PATH = './models/bisindo_hybrid_model_v4_finetuned.keras'
     DATA_DIR = './dataset/BISINDO'
-    TFLITE_OUTPUT_PATH = './models/bisindo_model_lightweight.tflite' # Nama file output baru
+    TFLITE_OUTPUT_PATH = './models/bisindo_model_lightweight1.tflite' # Nama file output baru
 
 LABEL_FILE_PATH = './models/labels.txt'
 

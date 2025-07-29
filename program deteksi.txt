@@ -1,0 +1,554 @@
+#@title 1. Setup dan Impor Pustaka
+# Sel ini akan menginstal pustaka yang diperlukan dan mengimpor modul-modul standar.
+
+# Instal pustaka jika belum ada
+!pip install mediapipe opencv-python tensorflow scikit-learn matplotlib
+
+import os
+import cv2
+import mediapipe as mp
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, Input
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import shutil # Untuk operasi file seperti menghapus direktori
+
+# Impor untuk Google Drive
+from google.colab import drive
+
+print("Pustaka berhasil diinstal dan diimpor.")
+
+#@title 2. Hubungkan ke Google Drive dan Atur Path
+# Sel ini akan menghubungkan Colab ke Google Drive Anda dan mengatur path dasar.
+# Anda perlu membuat struktur folder yang dijelaskan di Google Drive Anda.
+
+drive.mount('/content/drive')
+
+# Ganti 'SignLanguageProject' dengan nama folder proyek Anda jika berbeda
+DRIVE_BASE_PATH = '/content/drive/MyDrive/SignLanguageProject'
+DATASET_PATH = os.path.join(DRIVE_BASE_PATH, 'dataset_isyarat') # Path untuk gambar mentah
+PROCESSED_DATA_PATH = os.path.join(DRIVE_BASE_PATH, 'processed_data') # Path untuk data landmark yang diproses
+MODELS_PATH = os.path.join(DRIVE_BASE_PATH, 'models') # Path untuk menyimpan model
+
+# Buat direktori jika belum ada
+os.makedirs(DATASET_PATH, exist_ok=True)
+os.makedirs(PROCESSED_DATA_PATH, exist_ok=True)
+os.makedirs(MODELS_PATH, exist_ok=True)
+
+print(f"Google Drive terhubung.")
+print(f"Path dasar proyek: {DRIVE_BASE_PATH}")
+print("Pastikan Anda telah membuat struktur folder berikut di Google Drive Anda:")
+print(f"1. {DRIVE_BASE_PATH}")
+print(f"   - dataset_isyarat/  (Untuk menyimpan gambar isyarat per kelas)")
+print(f"     - KELAS_A/ (Contoh: folder untuk isyarat 'A')")
+print(f"       - gambar1.jpg")
+print(f"       - gambar2.png")
+print(f"     - KELAS_B/ (Contoh: folder untuk isyarat 'B')")
+print(f"       - gambar1.jpg")
+print(f"   - processed_data/ (Akan dibuat oleh skrip untuk menyimpan data landmark)")
+print(f"   - models/ (Akan dibuat oleh skrip untuk menyimpan model terlatih)")
+
+#@title 3. (Opsional) Buat Dataset Dummy untuk Pengujian Cepat
+# Jalankan sel ini HANYA jika Anda belum memiliki dataset sendiri dan ingin menguji alur kerja.
+# Ini akan membuat beberapa gambar dummy.
+# PERHATIAN: Gambar dummy ini sangat sederhana dan tidak akan menghasilkan model yang baik.
+# Ini hanya untuk demonstrasi alur kerja.
+
+CREATE_DUMMY_DATASET = False # Set ke True untuk membuat dataset dummy
+
+if CREATE_DUMMY_DATASET:
+    print("Membuat dataset dummy...")
+    dummy_classes = ['A', 'B', 'C']
+    num_dummy_images_per_class = 5
+
+    # Hapus folder dataset dummy jika sudah ada untuk menghindari duplikasi
+    if os.path.exists(DATASET_PATH) and any(os.scandir(DATASET_PATH)):
+        print(f"Menghapus konten lama di {DATASET_PATH} untuk dataset dummy...")
+        for item_name in os.listdir(DATASET_PATH):
+            item_path = os.path.join(DATASET_PATH, item_name)
+            if os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+            else:
+                os.remove(item_path)
+
+    for sign_class in dummy_classes:
+        class_path = os.path.join(DATASET_PATH, sign_class)
+        os.makedirs(class_path, exist_ok=True)
+        for i in range(num_dummy_images_per_class):
+            # Buat gambar dummy sederhana
+            img = np.zeros((100, 100, 3), dtype=np.uint8)
+            # Tambahkan sedikit variasi berdasarkan kelas
+            if sign_class == 'A':
+                cv2.circle(img, (50, 50), 20 + i, (0, 255, 0), -1) # Lingkaran hijau
+            elif sign_class == 'B':
+                cv2.rectangle(img, (20+i, 20+i), (70-i, 70-i), (255, 0, 0), -1) # Persegi biru
+            else: # C
+                cv2.line(img, (10, 10+i*5), (90, 90-i*5), (0, 0, 255), 3) # Garis merah
+            
+            cv2.imwrite(os.path.join(class_path, f'dummy_{sign_class}_{i}.png'), img)
+    print(f"Dataset dummy dibuat di {DATASET_PATH}")
+    print("Silakan unggah dataset Anda sendiri ke Google Drive untuk hasil yang lebih baik.")
+else:
+    print("Melewati pembuatan dataset dummy. Pastikan dataset Anda sudah ada di Google Drive.")
+
+
+#@title 4. Ekstraksi Landmark Tangan menggunakan MediaPipe
+# Sel ini berisi fungsi untuk memproses gambar, mengekstrak landmark tangan,
+# dan menyimpannya.
+
+# Inisialisasi MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(static_image_mode=True, max_num_hands=1, min_detection_confidence=0.5)
+
+def extract_landmarks_from_image(image_path):
+    """
+    Mengekstrak landmark tangan dari satu gambar.
+    Mengembalikan array NumPy yang dinormalisasi dari landmark (x, y) atau None jika tidak ada tangan terdeteksi.
+    Kita akan menggunakan 21 landmark, masing-masing dengan koordinat x dan y. Jadi, 21*2 = 42 fitur.
+    """
+    image = cv2.imread(image_path)
+    if image is None:
+        print(f"Error: Tidak dapat membaca gambar {image_path}")
+        return None
+
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = hands.process(image_rgb)
+
+    if results.multi_hand_landmarks:
+        hand_landmarks = results.multi_hand_landmarks[0] # Ambil tangan pertama yang terdeteksi
+
+        # Ekstrak landmark (x, y)
+        landmarks_xy = []
+        for landmark in hand_landmarks.landmark:
+            landmarks_xy.append(landmark.x)
+            landmarks_xy.append(landmark.y)
+            # Kita bisa juga menyertakan landmark.z jika diinginkan (menjadi 21*3 = 63 fitur)
+            # landmarks_xy.append(landmark.z)
+
+
+        # Normalisasi landmark
+        # 1. Buat semua landmark relatif terhadap pergelangan tangan (landmark 0)
+        base_x, base_y = landmarks_xy[0], landmarks_xy[1]
+        normalized_landmarks = []
+        for i in range(0, len(landmarks_xy), 2):
+            normalized_landmarks.append(landmarks_xy[i] - base_x)
+            normalized_landmarks.append(landmarks_xy[i+1] - base_y)
+        
+        # 2. Skalakan landmark agar invarian terhadap ukuran
+        # Temukan nilai absolut maksimum dari koordinat yang dinormalisasi (setelah translasi)
+        # Hindari pembagian dengan nol jika semua landmark adalah (0,0) setelah translasi (sangat tidak mungkin)
+        max_val = np.max(np.abs(normalized_landmarks))
+        if max_val == 0: # Kasus yang sangat jarang terjadi
+             max_val = 1e-6 # nilai kecil untuk menghindari pembagian dengan nol
+
+        scaled_landmarks = np.array(normalized_landmarks) / max_val
+        
+        return scaled_landmarks.flatten() # Ratakan menjadi 1D array
+    else:
+        # print(f"Tidak ada tangan terdeteksi di {image_path}")
+        return None
+
+def process_dataset(dataset_dir, output_dir):
+    """
+    Memproses semua gambar dalam dataset_dir, mengekstrak landmark,
+    dan menyimpannya ke output_dir.
+    """
+    print(f"Memulai pemrosesan dataset dari: {dataset_dir}")
+    all_landmarks = []
+    all_labels = []
+    
+    # Hapus direktori data yang diproses jika sudah ada, untuk menghindari data lama
+    if os.path.exists(output_dir):
+        print(f"Menghapus konten lama di {output_dir}...")
+        shutil.rmtree(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+
+    class_names = sorted([d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))])
+    if not class_names:
+        print(f"Tidak ada folder kelas ditemukan di {dataset_dir}. Pastikan dataset Anda terstruktur dengan benar.")
+        return np.array([]), np.array([]), []
+
+    print(f"Kelas yang ditemukan: {class_names}")
+
+    for class_index, class_name in enumerate(class_names):
+        class_path = os.path.join(dataset_dir, class_name)
+        num_images_processed = 0
+        num_images_skipped = 0
+        print(f"Memproses kelas: {class_name} (indeks: {class_index})")
+        
+        image_files = [f for f in os.listdir(class_path) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        if not image_files:
+            print(f"  Tidak ada file gambar ditemukan di {class_path}")
+            continue
+
+        for image_name in image_files:
+            image_path = os.path.join(class_path, image_name)
+            landmarks = extract_landmarks_from_image(image_path)
+            if landmarks is not None:
+                all_landmarks.append(landmarks)
+                all_labels.append(class_index)
+                num_images_processed += 1
+            else:
+                num_images_skipped +=1
+        print(f"  Selesai memproses kelas {class_name}. Gambar diproses: {num_images_processed}, Gambar dilewati: {num_images_skipped}")
+
+    if not all_landmarks:
+        print("Tidak ada landmark yang berhasil diekstrak dari dataset.")
+        return np.array([]), np.array([]), class_names
+
+    # Simpan data yang diproses
+    np.save(os.path.join(output_dir, 'landmarks.npy'), np.array(all_landmarks))
+    np.save(os.path.join(output_dir, 'labels.npy'), np.array(all_labels))
+    with open(os.path.join(output_dir, 'class_names.txt'), 'w') as f:
+        for name in class_names:
+            f.write(f"{name}\n")
+            
+    print(f"Data landmark dan label berhasil disimpan di {output_dir}")
+    return np.array(all_landmarks), np.array(all_labels), class_names
+
+# Jalankan pemrosesan dataset
+# Pastikan DATASET_PATH sudah berisi gambar-gambar Anda yang terorganisir per kelas
+# Contoh: /content/drive/MyDrive/SignLanguageProject/dataset_isyarat/A/img1.jpg
+#         /content/drive/MyDrive/SignLanguageProject/dataset_isyarat/B/img1.jpg
+#         ...
+
+# Cek apakah dataset ada isinya
+if not os.listdir(DATASET_PATH) and not CREATE_DUMMY_DATASET: # Jika tidak ada dataset dummy dan folder dataset kosong
+    print(f"Folder dataset di {DATASET_PATH} kosong. Harap unggah gambar Anda atau jalankan sel pembuatan dataset dummy.")
+else:
+    landmarks_data, labels_data, class_names_loaded = process_dataset(DATASET_PATH, PROCESSED_DATA_PATH)
+    if landmarks_data.size > 0:
+        print(f"Total landmark diekstrak: {landmarks_data.shape[0]}")
+        print(f"Bentuk data landmark per sampel: {landmarks_data.shape[1]}") # Seharusnya 42 atau 63
+        print(f"Total label: {labels_data.shape[0]}")
+        print(f"Nama kelas: {class_names_loaded}")
+    else:
+        print("Tidak ada data yang diproses. Periksa dataset Anda.")
+
+# Tutup objek hands setelah selesai
+hands.close()
+
+
+#@title 5. Persiapan Data untuk Model CNN
+# Sel ini akan memuat data yang diproses, membaginya menjadi set pelatihan dan pengujian,
+# dan melakukan one-hot encoding pada label.
+
+# Muat data yang sudah diproses jika belum ada di memori
+try:
+    if 'landmarks_data' not in locals() or landmarks_data.size == 0: # Cek jika variabel belum ada atau kosong
+        print("Memuat data landmark dan label dari file...")
+        landmarks_data = np.load(os.path.join(PROCESSED_DATA_PATH, 'landmarks.npy'))
+        labels_data = np.load(os.path.join(PROCESSED_DATA_PATH, 'labels.npy'))
+        with open(os.path.join(PROCESSED_DATA_PATH, 'class_names.txt'), 'r') as f:
+            class_names_loaded = [line.strip() for line in f.readlines()]
+        print("Data berhasil dimuat.")
+        print(f"Total landmark: {landmarks_data.shape[0]}, Fitur per landmark: {landmarks_data.shape[1]}")
+        print(f"Total label: {labels_data.shape[0]}")
+        print(f"Nama kelas: {class_names_loaded}")
+
+    if landmarks_data.size == 0:
+        raise ValueError("Data landmark kosong. Tidak dapat melanjutkan.")
+
+    # Pastikan jumlah sampel landmark dan label sama
+    assert landmarks_data.shape[0] == labels_data.shape[0], "Jumlah sampel landmark dan label tidak cocok!"
+
+    # Bagi data menjadi set pelatihan dan pengujian
+    # stratify=labels_data penting untuk memastikan distribusi kelas yang seimbang
+    X_train, X_test, y_train, y_test = train_test_split(
+        landmarks_data, 
+        labels_data, 
+        test_size=0.2, # 20% untuk pengujian
+        random_state=42, # Untuk reproduktifitas
+        stratify=labels_data if np.unique(labels_data, return_counts=True)[1].min() > 1 else None # Stratify jika setiap kelas punya >1 sampel
+    )
+
+    # One-hot encode labels
+    num_classes = len(class_names_loaded)
+    y_train_categorical = to_categorical(y_train, num_classes=num_classes)
+    y_test_categorical = to_categorical(y_test, num_classes=num_classes)
+
+    print(f"Bentuk X_train: {X_train.shape}")
+    print(f"Bentuk X_test: {X_test.shape}")
+    print(f"Bentuk y_train_categorical: {y_train_categorical.shape}")
+    print(f"Bentuk y_test_categorical: {y_test_categorical.shape}")
+    print(f"Jumlah kelas: {num_classes}")
+
+except FileNotFoundError:
+    print(f"Error: File data yang diproses tidak ditemukan di {PROCESSED_DATA_PATH}.")
+    print("Pastikan Anda telah menjalankan sel ekstraksi landmark terlebih dahulu.")
+    # Hentikan eksekusi lebih lanjut jika file tidak ada, dengan membuat variabel dummy agar tidak error
+    X_train, X_test, y_train_categorical, y_test_categorical, num_classes = None, None, None, None, 0
+except ValueError as e:
+    print(f"Error: {e}")
+    X_train, X_test, y_train_categorical, y_test_categorical, num_classes = None, None, None, None, 0
+except Exception as e:
+    print(f"Terjadi error tak terduga saat persiapan data: {e}")
+    X_train, X_test, y_train_categorical, y_test_categorical, num_classes = None, None, None, None, 0
+
+
+#@title 6. Definisi dan Kompilasi Model CNN
+# Sel ini mendefinisikan arsitektur model CNN sederhana untuk data landmark.
+# Konsep "Transfer Learning" di sini lebih merujuk pada penggunaan arsitektur yang terbukti baik
+# atau potensi fine-tuning jika ada model dasar yang dilatih pada data landmark besar.
+# Untuk kasus ini, kita akan membuat model kustom yang sesuai untuk data landmark.
+
+if X_train is not None and num_classes > 0:
+    input_shape = (X_train.shape[1],) # Jumlah fitur landmark, misal 42 atau 63
+
+    model = Sequential([
+        Input(shape=input_shape, name="input_layer"),
+        Dense(128, activation='relu', name="dense_1"),
+        Dropout(0.3, name="dropout_1"), # Dropout untuk mengurangi overfitting
+        Dense(64, activation='relu', name="dense_2"),
+        Dropout(0.3, name="dropout_2"),
+        Dense(32, activation='relu', name="dense_3"),
+        Dense(num_classes, activation='softmax', name="output_layer") # Lapisan output dengan softmax untuk klasifikasi
+    ])
+
+    model.compile(optimizer='adam',
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+
+    model.summary()
+    print("Model CNN berhasil dibuat dan dikompilasi.")
+else:
+    print("Tidak dapat membuat model karena data pelatihan tidak tersedia atau jumlah kelas tidak valid.")
+    model = None # Pastikan model adalah None jika tidak bisa dibuat
+
+
+#@title 7. Pelatihan Model
+# Sel ini akan melatih model CNN yang telah didefinisikan.
+
+if model is not None and X_train is not None and y_train_categorical is not None:
+    # Definisikan callbacks
+    # ModelCheckpoint untuk menyimpan model terbaik selama pelatihan
+    checkpoint_path = os.path.join(MODELS_PATH, 'best_sign_language_model.keras') # Gunakan .keras
+    model_checkpoint = ModelCheckpoint(
+        filepath=checkpoint_path,
+        save_best_only=True, # Hanya simpan model jika performa validasi meningkat
+        monitor='val_accuracy',
+        mode='max',
+        verbose=1
+    )
+
+    # EarlyStopping untuk menghentikan pelatihan jika tidak ada peningkatan
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=15, # Jumlah epoch tanpa peningkatan sebelum berhenti
+        verbose=1,
+        restore_best_weights=True # Kembalikan bobot dari epoch terbaik
+    )
+
+    print("Memulai pelatihan model...")
+    history = model.fit(
+        X_train, y_train_categorical,
+        epochs=100, # Jumlah epoch (bisa disesuaikan)
+        batch_size=32, # Ukuran batch (bisa disesuaikan)
+        validation_data=(X_test, y_test_categorical),
+        callbacks=[model_checkpoint, early_stopping],
+        verbose=1
+    )
+    print("Pelatihan model selesai.")
+
+    # Plot riwayat pelatihan
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['accuracy'], label='Akurasi Pelatihan')
+    plt.plot(history.history['val_accuracy'], label='Akurasi Validasi')
+    plt.title('Akurasi Model')
+    plt.xlabel('Epoch')
+    plt.ylabel('Akurasi')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['loss'], label='Loss Pelatihan')
+    plt.plot(history.history['val_loss'], label='Loss Validasi')
+    plt.title('Loss Model')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+else:
+    print("Tidak dapat melatih model karena model atau data tidak siap.")
+    history = None
+
+
+#@title 8. Evaluasi Model
+# Sel ini akan mengevaluasi model pada set pengujian.
+
+if model is not None and X_test is not None and y_test_categorical is not None and history is not None:
+    print("Mengevaluasi model pada data pengujian...")
+    # Muat model terbaik yang disimpan jika ada (jika EarlyStopping mengembalikan bobot yang lebih buruk)
+    # Namun, EarlyStopping dengan restore_best_weights=True seharusnya sudah menangani ini.
+    # Jika ingin memastikan, bisa muat ulang:
+    # best_model_path = os.path.join(MODELS_PATH, 'best_sign_language_model.keras')
+    # if os.path.exists(best_model_path):
+    #    print(f"Memuat model terbaik dari: {best_model_path}")
+    #    model = tf.keras.models.load_model(best_model_path)
+        
+    loss, accuracy = model.evaluate(X_test, y_test_categorical, verbose=0)
+    print(f"\nLoss pada data pengujian: {loss:.4f}")
+    print(f"Akurasi pada data pengujian: {accuracy*100:.2f}%")
+
+    # Prediksi pada data pengujian untuk laporan klasifikasi dan confusion matrix
+    y_pred_probabilities = model.predict(X_test)
+    y_pred_classes = np.argmax(y_pred_probabilities, axis=1) # Dapatkan kelas dengan probabilitas tertinggi
+    y_true_classes = np.argmax(y_test_categorical, axis=1) # Ubah y_test_categorical kembali ke label kelas tunggal
+
+    print("\nLaporan Klasifikasi:")
+    if len(class_names_loaded) > 0:
+        # Pastikan target_names adalah list of strings
+        target_names_str = [str(name) for name in class_names_loaded]
+        print(classification_report(y_true_classes, y_pred_classes, target_names=target_names_str, zero_division=0))
+    else:
+        print("Nama kelas tidak tersedia untuk laporan klasifikasi.")
+
+    # Confusion Matrix
+    cm = confusion_matrix(y_true_classes, y_pred_classes)
+    plt.figure(figsize=(8, 6))
+    # Cek apakah class_names_loaded ada dan tidak kosong
+    display_labels = class_names_loaded if class_names_loaded else None
+    
+    try:
+        import seaborn as sns # Import seaborn untuk heatmap yang lebih baik
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=display_labels, yticklabels=display_labels)
+    except ImportError: # Fallback jika seaborn tidak ada
+        plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        plt.colorbar()
+        if display_labels:
+            tick_marks = np.arange(len(display_labels))
+            plt.xticks(tick_marks, display_labels, rotation=45)
+            plt.yticks(tick_marks, display_labels)
+        
+        thresh = cm.max() / 2.
+        for i, j in np.ndindex(cm.shape):
+            plt.text(j, i, format(cm[i, j], 'd'),
+                     horizontalalignment="center",
+                     color="white" if cm[i, j] > thresh else "black")
+
+    plt.title('Confusion Matrix')
+    plt.ylabel('Kelas Sebenarnya (True)')
+    plt.xlabel('Kelas Prediksi (Predicted)')
+    plt.tight_layout()
+    plt.show()
+
+else:
+    print("Tidak dapat mengevaluasi model karena model atau data pengujian tidak siap, atau pelatihan tidak dilakukan.")
+
+
+#@title 9. Simpan Model Final dan Konversi ke TensorFlow.js (Instruksi)
+# Sel ini akan menyimpan model terlatih final dan memberikan instruksi untuk konversi ke TF.js.
+
+if model is not None and history is not None: # Pastikan model sudah dilatih
+    # Simpan model final dalam format Keras (.keras)
+    final_model_path = os.path.join(MODELS_PATH, 'final_sign_language_model.keras')
+    model.save(final_model_path)
+    print(f"Model final berhasil disimpan di: {final_model_path}")
+
+    # Simpan juga dalam format H5 (jika diperlukan untuk beberapa tools lama)
+    final_model_h5_path = os.path.join(MODELS_PATH, 'final_sign_language_model.h5')
+    model.save(final_model_h5_path)
+    print(f"Model final juga disimpan dalam format H5 di: {final_model_h5_path}")
+
+    print("\n--- Instruksi Konversi Model ke TensorFlow.js ---")
+    print("Untuk mendeploy model ini ke website menggunakan TensorFlow.js, Anda perlu mengonversinya.")
+    print("1. Pastikan Anda telah menginstal tensorflowjs: pip install tensorflowjs")
+    print("2. Jalankan perintah berikut di terminal Anda (setelah mengunduh model .h5 atau .keras ke lokal):")
+    
+    tfjs_output_path = os.path.join(MODELS_PATH, 'tfjs_model')
+    # Buat path ini di Drive agar terlihat jelas
+    os.makedirs(tfjs_output_path, exist_ok=True)
+
+    print(f"\nContoh perintah konversi (gunakan path yang sesuai dengan lokasi file Anda):")
+    print(f"tensorflowjs_converter --input_format keras \\")
+    print(f"                       {final_model_path} \\") # Path ke model .keras di Google Drive
+    print(f"                       {tfjs_output_path}")   # Path output untuk model TF.js di Google Drive
+    
+    print(f"\nAtau jika Anda mengunduh model .h5 ke komputer lokal Anda:")
+    print(f"tensorflowjs_converter --input_format keras \\")
+    print(f"                       path/lokal/anda/final_sign_language_model.h5 \\")
+    print(f"                       path/lokal/anda/tfjs_model_output_directory")
+
+    print("\nPerintah di atas akan menghasilkan file 'model.json' dan beberapa file bobot '.bin' di direktori output.")
+    print("File-file inilah yang akan Anda gunakan di proyek web TensorFlow.js Anda.")
+    print(f"Jangan lupa juga menyimpan nama-nama kelas (class_names.txt) yang ada di {PROCESSED_DATA_PATH} karena ini akan dibutuhkan saat inferensi di web.")
+
+else:
+    print("Model belum dilatih atau tidak tersedia, jadi tidak ada yang disimpan atau dikonversi.")
+
+
+#@title 10. Contoh Prediksi pada Gambar Tunggal (Unggah Gambar)
+# Sel ini memungkinkan Anda mengunggah gambar dan melakukan prediksi menggunakan model terlatih.
+
+from google.colab import files
+import IPython.display as display
+
+if model is not None and 'class_names_loaded' in locals() and class_names_loaded:
+    # Muat model terbaik jika belum dimuat (atau gunakan model yang saat ini ada di memori)
+    # Untuk konsistensi, kita bisa muat ulang model terbaik yang disimpan
+    best_model_path = os.path.join(MODELS_PATH, 'best_sign_language_model.keras')
+    if os.path.exists(best_model_path):
+        print(f"Memuat model terbaik dari: {best_model_path} untuk prediksi.")
+        prediction_model = tf.keras.models.load_model(best_model_path)
+    else:
+        print("Model terbaik tidak ditemukan, menggunakan model saat ini di memori (jika ada).")
+        prediction_model = model # Gunakan model yang sudah ada di memori jika path tidak ditemukan
+
+    # Inisialisasi MediaPipe Hands lagi jika belum (mungkin sudah ditutup)
+    mp_hands_pred = mp.solutions.hands
+    hands_pred = mp_hands_pred.Hands(static_image_mode=True, max_num_hands=1, min_detection_confidence=0.5)
+
+    uploaded = files.upload()
+
+    if not uploaded:
+        print("Tidak ada file yang diunggah.")
+    else:
+        for fn in uploaded.keys():
+            print(f'Memproses gambar: {fn}')
+            image_path_pred = fn # Nama file di direktori Colab saat ini
+
+            # Tampilkan gambar yang diunggah
+            display.display(display.Image(image_path_pred, width=200))
+
+            # Ekstrak landmark
+            landmarks_pred = extract_landmarks_from_image(image_path_pred) # Gunakan fungsi yang sama
+
+            if landmarks_pred is not None:
+                # Data landmark perlu di-reshape agar sesuai dengan input model (1, num_features)
+                landmarks_pred_reshaped = np.expand_dims(landmarks_pred, axis=0)
+                
+                # Lakukan prediksi
+                prediction_probabilities = prediction_model.predict(landmarks_pred_reshaped)
+                predicted_class_index = np.argmax(prediction_probabilities, axis=1)[0]
+                predicted_class_name = class_names_loaded[predicted_class_index]
+                confidence = prediction_probabilities[0][predicted_class_index] * 100
+
+                print(f"\nPrediksi Isyarat: {predicted_class_name}")
+                print(f"Keyakinan (Confidence): {confidence:.2f}%")
+                
+                # Tampilkan probabilitas untuk semua kelas (opsional)
+                # print("\nProbabilitas per kelas:")
+                # for i, class_name in enumerate(class_names_loaded):
+                #    print(f"  {class_name}: {prediction_probabilities[0][i]*100:.2f}%")
+            else:
+                print("Tidak dapat mendeteksi tangan pada gambar yang diunggah.")
+            
+            # Hapus file yang diunggah dari direktori Colab setelah diproses
+            try:
+                os.remove(image_path_pred)
+            except OSError as e:
+                print(f"Error saat menghapus file {image_path_pred}: {e}")
+    
+    hands_pred.close() # Tutup objek hands setelah selesai
+else:
+    print("Model belum dilatih atau nama kelas tidak tersedia. Tidak dapat melakukan prediksi.")
+    print("Pastikan semua sel sebelumnya telah dijalankan dengan sukses.")
+

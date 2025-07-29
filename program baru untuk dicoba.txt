@@ -1,0 +1,137 @@
+# Colab Setup: Install latest dependencies without version pinning
+env_packages = ['mediapipe', 'tensorflow', 'opencv-python', 'scikit-learn']
+# Uncomment and run the following in Colab
+# for pkg in env_packages:
+#     get_ipython().system(f'pip install {pkg}')
+
+# gesture_recognition_colab.py
+import os
+import cv2
+import numpy as np
+import mediapipe as mp
+import tensorflow as tf
+from tensorflow.keras import layers, Model
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.model_selection import train_test_split
+import pickle
+
+# ----- Configuration -----
+RAW_DATA_DIR = 'raw_images'    # Folders A-Z berisi gambar .jpg/.png
+FEATURES_FILE = 'dataset/hand_data.pkl'
+MODEL_FILE = 'gesture_model.h5'
+TEST_SIZE = 0.2
+RANDOM_STATE = 42
+BATCH_SIZE = 32
+EPOCHS = 50
+
+# ----- MediaPipe Hands Setup -----
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands_detector = mp_hands.Hands(
+    static_image_mode=True,
+    max_num_hands=1,
+    model_complexity=0,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
+# ----- 1. Extract Landmarks -----
+def extract_landmarks(image_path):
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    results = hands_detector.process(rgb)
+    if not results.multi_hand_landmarks:
+        return None
+    lm = results.multi_hand_landmarks[0].landmark
+    coords = np.array([[p.x, p.y, p.z] for p in lm], dtype=np.float32)
+    return coords.flatten()
+
+# ----- 2. Prepare Dataset -----
+def prepare_dataset(raw_dir=RAW_DATA_DIR, out_file=FEATURES_FILE):
+    X, y = [], []
+    labels = sorted(d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d)))
+    label_map = {lbl: idx for idx, lbl in enumerate(labels)}
+    for lbl in labels:
+        folder = os.path.join(raw_dir, lbl)
+        for fname in os.listdir(folder):
+            if not fname.lower().endswith(('.jpg', '.png')):
+                continue
+            feats = extract_landmarks(os.path.join(folder, fname))
+            if feats is not None:
+                X.append(feats)
+                y.append(label_map[lbl])
+    X = np.vstack(X)
+    y = np.array(y)
+    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+    with open(out_file, 'wb') as f:
+        pickle.dump((X, y, labels), f)
+    print(f"Dataset ready: X={X.shape}, y={y.shape}, classes={len(labels)}")
+
+# ----- 3. Build and Train Model -----
+def build_model(input_dim, num_classes):
+    inp = layers.Input(shape=(input_dim,))
+    x = layers.Dense(256, activation='relu')(inp)
+    x = layers.Dropout(0.2)(x)
+    x = layers.Dense(128, activation='relu')(x)
+    x = layers.Dropout(0.2)(x)
+    out = layers.Dense(num_classes, activation='softmax')(x)
+    return Model(inputs=inp, outputs=out)
+
+
+def train_and_save_model(features_file=FEATURES_FILE, model_file=MODEL_FILE):
+    with open(features_file, 'rb') as f:
+        X, y, labels = pickle.load(f)
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE
+    )
+    model = build_model(X.shape[1], len(labels))
+    model.compile(
+        optimizer='adam',
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy']
+    )
+    cbs = [
+        EarlyStopping(monitor='val_accuracy', patience=5, restore_best_weights=True),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3)
+    ]
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=cbs
+    )
+    model.save(model_file)
+    print(f"Model saved: {model_file}")
+    return model, labels
+
+# ----- 4. Real-Time Detection -----
+def realtime_detection(model_file=MODEL_FILE, labels=None):
+    model = tf.keras.models.load_model(model_file)
+    cap = cv2.VideoCapture(0)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = hands_detector.process(rgb)
+        if res.multi_hand_landmarks:
+            coords = np.array([[p.x, p.y, p.z] for p in res.multi_hand_landmarks[0].landmark], dtype=np.float32).flatten()[None, :]
+            probs = model.predict(coords, verbose=0)[0]
+            idx = np.argmax(probs)
+            text = f"{labels[idx]}: {probs[idx]:.2f}"
+            cv2.putText(frame, text, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+            mp_drawing.draw_landmarks(frame, res.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS)
+        cv2.imshow('ASL Real-Time Demo', frame)
+        if cv2.waitKey(1) & 0xFF in (27, ord('q')):
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+
+# ----- 5. Main Execution -----
+if __name__ == '__main__':
+    prepare_dataset()
+    model, labels = train_and_save_model()
+    realtime_detection(labels=labels)
